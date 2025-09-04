@@ -1703,12 +1703,12 @@ int ipa3_setup_sys_pipe(struct ipa_sys_connect_params *sys_in, u32 *clnt_hdl)
 				sys_in->client == IPA_CLIENT_APPS_WAN_COAL_CONS)
 				ep->sys->page_recycle_repl->capacity =
 						(ep->sys->rx_pool_sz + 1) *
-						ipa3_ctx->ipa_gen_rx_cmn_page_pool_sz_factor;
+						ipa3_ctx->ipa_gen_rx_cmn_page_pool_sz_factor * 2;
 			else
 				ep->sys->page_recycle_repl->capacity =
 						(ep->sys->rx_pool_sz + 1) *
-						IPA_GENERIC_RX_PAGE_POOL_SZ_FACTOR;
-			IPADBG("Page repl capacity for client:%d, value:%d\n",
+						IPA_GENERIC_RX_PAGE_POOL_SZ_FACTOR * 2;
+			IPAERR("Page repl capacity for client:%d, value:%d\n",
 					   sys_in->client, ep->sys->page_recycle_repl->capacity);
 			INIT_LIST_HEAD(&ep->sys->page_recycle_repl->page_repl_head);
 			ep->sys->repl = kzalloc(sizeof(*ep->sys->repl), GFP_KERNEL);
@@ -2556,7 +2556,6 @@ static struct page *ipa3_alloc_page(
 	*page_order = p_order;
 	return page;
 }
-
 
 static struct ipa3_rx_pkt_wrapper *ipa3_alloc_rx_pkt_page(
 	gfp_t flag, bool is_tmp_alloc, struct ipa3_sys_context *sys)
