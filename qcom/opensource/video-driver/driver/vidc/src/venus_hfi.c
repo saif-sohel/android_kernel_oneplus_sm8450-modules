@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  * Copyright (c) 2020-2021, The Linux Foundation. All rights reserved.
  */
 
@@ -9,7 +10,10 @@
 #include <linux/irqreturn.h>
 #include <linux/reset.h>
 #include <linux/interconnect.h>
+#include <linux/version.h>
+#if (KERNEL_VERSION(5, 15, 0) > LINUX_VERSION_CODE)
 #include <soc/qcom/subsystem_restart.h>
+#endif
 #include <linux/of_address.h>
 #include <linux/firmware.h>
 #include <linux/qcom_scm.h>
@@ -640,7 +644,7 @@ static int __tzbsp_set_video_state(enum tzbsp_video_state state)
 int __set_clk_rate(struct msm_vidc_core *core,
 		struct clock_info *cl, u64 rate)
 {
-	int rc = 0;
+	int rc = 0, src_clk_scale_ratio = 1;
 	struct mmrm_client_data client_data;
 	struct mmrm_client *client;
 
@@ -661,7 +665,8 @@ int __set_clk_rate(struct msm_vidc_core *core,
 	 * and used for scaling.
 	 * TODO: Remove this scaling if using source clock instead of branch clock.
 	 */
-	rate = rate * MSM_VIDC_CLOCK_SOURCE_SCALING_RATIO;
+	src_clk_scale_ratio = msm_vidc_get_src_clk_scaling_ratio(core);
+	rate = rate * src_clk_scale_ratio;
 
 	/* bail early if requested clk rate is not changed */
 	if (rate == cl->prev)
@@ -1102,6 +1107,7 @@ static void __flush_debug_queue(struct msm_vidc_core *core,
 	struct hfi_debug_header *pkt;
 	bool local_packet = false;
 	enum vidc_msg_prio log_level = msm_vidc_debug;
+	int rc = 0;
 
 	if (!core) {
 		d_vpr_e("%s: invalid params\n", __func__);
@@ -1109,13 +1115,11 @@ static void __flush_debug_queue(struct msm_vidc_core *core,
 	}
 
 	if (!packet || !packet_size) {
-		packet = kzalloc(VIDC_IFACEQ_VAR_HUGE_PKT_SIZE, GFP_KERNEL);
-		if (!packet) {
-			d_vpr_e("%s: fail to allocate\n", __func__);
+		rc = msm_vidc_vmem_alloc(VIDC_IFACEQ_VAR_HUGE_PKT_SIZE, (void **)&packet, __func__);
+		if (rc)
 			return;
-		}
-		packet_size = VIDC_IFACEQ_VAR_HUGE_PKT_SIZE;
 
+		packet_size = VIDC_IFACEQ_VAR_HUGE_PKT_SIZE;
 		local_packet = true;
 
 		/*
@@ -1152,7 +1156,7 @@ static void __flush_debug_queue(struct msm_vidc_core *core,
 	}
 
 	if (local_packet)
-		kfree(packet);
+		msm_vidc_vmem_free((void **)&packet);
 }
 
 static int __sys_set_debug(struct msm_vidc_core *core, u32 debug)
@@ -2204,7 +2208,7 @@ static void __set_queue_hdr_defaults(struct hfi_queue_header *q_hdr)
 	q_hdr->qhdr_write_idx = 0x0;
 }
 
-static void __interface_queues_deinit(struct msm_vidc_core *core)
+void venus_hfi_interface_queues_deinit(struct msm_vidc_core *core)
 {
 	int i;
 
@@ -2228,69 +2232,21 @@ static void __interface_queues_deinit(struct msm_vidc_core *core)
 	core->sfr.align_device_addr = 0;
 }
 
-static int __interface_queues_init(struct msm_vidc_core *core)
+static int venus_hfi_reset_queue_header(struct msm_vidc_core *core)
 {
-	int rc = 0;
-	struct hfi_queue_table_header *q_tbl_hdr;
-	struct hfi_queue_header *q_hdr;
 	struct msm_vidc_iface_q_info *iface_q;
-	struct msm_vidc_alloc alloc;
-	struct msm_vidc_map map;
-	int offset = 0;
-	u32 i;
+	struct hfi_queue_header *q_hdr;
+	int i, rc = 0;
 
-	d_vpr_h("%s()\n", __func__);
-
-	memset(&alloc, 0, sizeof(alloc));
-	alloc.type       = MSM_VIDC_BUF_QUEUE;
-	alloc.region     = MSM_VIDC_NON_SECURE;
-	alloc.size       = TOTAL_QSIZE;
-	alloc.secure     = false;
-	alloc.map_kernel = true;
-	rc = msm_vidc_memory_alloc(core, &alloc);
-	if (rc) {
-		d_vpr_e("%s: alloc failed\n", __func__);
-		goto fail_alloc_queue;
+	if (!core) {
+		d_vpr_e("%s: invalid param\n", __func__);
+		return -EINVAL;
 	}
-
-	memset(&map, 0, sizeof(map));
-	map.type         = alloc.type;
-	map.region       = alloc.region;
-	map.dmabuf       = alloc.dmabuf;
-	rc = msm_vidc_memory_map(core, &map);
-	if (rc) {
-		d_vpr_e("%s: alloc failed\n", __func__);
-		goto fail_alloc_queue;
-	}
-
-	core->iface_q_table.align_virtual_addr = alloc.kvaddr;
-	core->iface_q_table.align_device_addr = map.device_addr;
-	core->iface_q_table.mem_size = VIDC_IFACEQ_TABLE_SIZE;
-	core->iface_q_table.alloc = alloc;
-	core->iface_q_table.map = map;
-	offset += core->iface_q_table.mem_size;
 
 	for (i = 0; i < VIDC_IFACEQ_NUMQ; i++) {
 		iface_q = &core->iface_queues[i];
-		iface_q->q_array.align_device_addr = map.device_addr + offset;
-		iface_q->q_array.align_virtual_addr = (void*)((char*)alloc.kvaddr + offset);
-		iface_q->q_array.mem_size = VIDC_IFACEQ_QUEUE_SIZE;
-		offset += iface_q->q_array.mem_size;
-		iface_q->q_hdr = VIDC_IFACEQ_GET_QHDR_START_ADDR(
-				core->iface_q_table.align_virtual_addr, i);
 		__set_queue_hdr_defaults(iface_q->q_hdr);
 	}
-
-	q_tbl_hdr = (struct hfi_queue_table_header *)
-			core->iface_q_table.align_virtual_addr;
-	q_tbl_hdr->qtbl_version = 0;
-	q_tbl_hdr->device_addr = (void *)core;
-	strlcpy(q_tbl_hdr->name, "msm_v4l2_vidc", sizeof(q_tbl_hdr->name));
-	q_tbl_hdr->qtbl_size = VIDC_IFACEQ_TABLE_SIZE;
-	q_tbl_hdr->qtbl_qhdr0_offset = sizeof(struct hfi_queue_table_header);
-	q_tbl_hdr->qtbl_qhdr_size = sizeof(struct hfi_queue_header);
-	q_tbl_hdr->qtbl_num_q = VIDC_IFACEQ_NUMQ;
-	q_tbl_hdr->qtbl_num_active_q = VIDC_IFACEQ_NUMQ;
 
 	iface_q = &core->iface_queues[VIDC_IFACEQ_CMDQ_IDX];
 	q_hdr = iface_q->q_hdr;
@@ -2312,6 +2268,84 @@ static int __interface_queues_init(struct msm_vidc_core *core)
 	 */
 	q_hdr->qhdr_rx_req = 0;
 
+	return rc;
+}
+
+int venus_hfi_interface_queues_init(struct msm_vidc_core *core)
+{
+	int rc = 0;
+	struct hfi_queue_table_header *q_tbl_hdr;
+	struct msm_vidc_iface_q_info *iface_q;
+	struct msm_vidc_alloc alloc;
+	struct msm_vidc_map map;
+	int offset = 0;
+	u32 i;
+
+	d_vpr_h("%s()\n", __func__);
+
+	if (core->iface_q_table.align_virtual_addr) {
+		d_vpr_h("%s: queues already allocated\n", __func__);
+		venus_hfi_reset_queue_header(core);
+		return 0;
+	}
+
+	memset(&alloc, 0, sizeof(alloc));
+	alloc.type       = MSM_VIDC_BUF_QUEUE;
+	alloc.region     = MSM_VIDC_NON_SECURE;
+	alloc.size       = TOTAL_QSIZE;
+	alloc.secure     = false;
+	alloc.map_kernel = true;
+	rc = msm_vidc_memory_alloc(core, &alloc);
+	if (rc) {
+		d_vpr_e("%s: alloc failed\n", __func__);
+		goto fail_alloc_queue;
+	}
+	core->iface_q_table.align_virtual_addr = alloc.kvaddr;
+	core->iface_q_table.alloc = alloc;
+
+	memset(&map, 0, sizeof(map));
+	map.type         = alloc.type;
+	map.region       = alloc.region;
+	map.dmabuf       = alloc.dmabuf;
+	rc = msm_vidc_memory_map(core, &map);
+	if (rc) {
+		d_vpr_e("%s: alloc failed\n", __func__);
+		goto fail_alloc_queue;
+	}
+	core->iface_q_table.align_device_addr = map.device_addr;
+	core->iface_q_table.map = map;
+
+	core->iface_q_table.mem_size = VIDC_IFACEQ_TABLE_SIZE;
+	offset += core->iface_q_table.mem_size;
+
+	for (i = 0; i < VIDC_IFACEQ_NUMQ; i++) {
+		iface_q = &core->iface_queues[i];
+		iface_q->q_array.align_device_addr = map.device_addr + offset;
+		iface_q->q_array.align_virtual_addr = (void*)((char*)alloc.kvaddr + offset);
+		iface_q->q_array.mem_size = VIDC_IFACEQ_QUEUE_SIZE;
+		offset += iface_q->q_array.mem_size;
+		iface_q->q_hdr = VIDC_IFACEQ_GET_QHDR_START_ADDR(
+				core->iface_q_table.align_virtual_addr, i);
+	}
+
+	q_tbl_hdr = (struct hfi_queue_table_header *)
+			core->iface_q_table.align_virtual_addr;
+	q_tbl_hdr->qtbl_version = 0;
+	q_tbl_hdr->device_addr = (void *)core;
+	strlcpy(q_tbl_hdr->name, "msm_v4l2_vidc", sizeof(q_tbl_hdr->name));
+	q_tbl_hdr->qtbl_size = VIDC_IFACEQ_TABLE_SIZE;
+	q_tbl_hdr->qtbl_qhdr0_offset = sizeof(struct hfi_queue_table_header);
+	q_tbl_hdr->qtbl_qhdr_size = sizeof(struct hfi_queue_header);
+	q_tbl_hdr->qtbl_num_q = VIDC_IFACEQ_NUMQ;
+	q_tbl_hdr->qtbl_num_active_q = VIDC_IFACEQ_NUMQ;
+
+	/* reset hfi queue header fields */
+	rc = venus_hfi_reset_queue_header(core);
+	if (rc) {
+		d_vpr_e("%s: init queue header failed\n", __func__);
+		goto fail_alloc_queue;
+	}
+
 	/* sfr buffer */
 	memset(&alloc, 0, sizeof(alloc));
 	alloc.type       = MSM_VIDC_BUF_QUEUE;
@@ -2324,6 +2358,9 @@ static int __interface_queues_init(struct msm_vidc_core *core)
 		d_vpr_e("%s: sfr alloc failed\n", __func__);
 		goto fail_alloc_queue;
 	}
+	core->sfr.align_virtual_addr = alloc.kvaddr;
+	core->sfr.alloc = alloc;
+
 	memset(&map, 0, sizeof(map));
 	map.type         = alloc.type;
 	map.region       = alloc.region;
@@ -2334,16 +2371,11 @@ static int __interface_queues_init(struct msm_vidc_core *core)
 		goto fail_alloc_queue;
 	}
 	core->sfr.align_device_addr = map.device_addr;
-	core->sfr.align_virtual_addr = alloc.kvaddr;
-	core->sfr.mem_size = ALIGNED_SFR_SIZE;
-	core->sfr.alloc = alloc;
 	core->sfr.map = map;
-	/* write sfr buffer size in first word */
-	*((u32 *)core->sfr.align_virtual_addr) = ALIGNED_SFR_SIZE;
 
-	rc = call_venus_op(core, setup_ucregion_memmap, core);
-	if (rc)
-		return rc;
+	core->sfr.mem_size = ALIGNED_SFR_SIZE;
+	/* write sfr buffer size in first word */
+	*((u32 *)core->sfr.align_virtual_addr) = core->sfr.mem_size;
 
 	return 0;
 fail_alloc_queue:
@@ -2500,7 +2532,15 @@ int __load_fw(struct msm_vidc_core *core)
 	__hand_off_regulators(core);
 	trace_msm_v4l2_vidc_fw_load("END");
 
+	/* configure interface_queues memory to firmware */
+	rc = call_venus_op(core, setup_ucregion_memmap, core);
+	if (rc) {
+		d_vpr_e("%s: failed to setup ucregion\n");
+		goto fail_setup_ucregion;
+	}
+
 	return rc;
+fail_setup_ucregion:
 fail_protect_mem:
 	if (core->dt->fw_cookie)
 		qcom_scm_pas_shutdown(core->dt->fw_cookie);
@@ -2699,11 +2739,11 @@ int venus_hfi_core_init(struct msm_vidc_core *core)
 	if (rc)
 		return rc;
 
-	rc = __load_fw(core);
+	rc = venus_hfi_interface_queues_init(core);
 	if (rc)
 		goto error;
 
-	rc = __interface_queues_init(core);
+	rc = __load_fw(core);
 	if (rc)
 		goto error;
 
@@ -2771,7 +2811,6 @@ int venus_hfi_core_deinit(struct msm_vidc_core *core, bool force)
 	 */
 	if (msm_vidc_fw_dump)
 		fw_coredump(core);
-	__interface_queues_deinit(core);
 
 	return 0;
 }

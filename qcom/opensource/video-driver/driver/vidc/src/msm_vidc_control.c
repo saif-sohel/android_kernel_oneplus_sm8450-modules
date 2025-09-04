@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2020-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include "msm_vidc_control.h"
@@ -229,6 +230,7 @@ static int msm_vidc_add_capid_to_list(struct msm_vidc_inst *inst,
 	enum msm_vidc_inst_capability_type cap_id,
 	enum msm_vidc_ctrl_list_type type)
 {
+	int rc = 0;
 	struct msm_vidc_inst_cap_entry *entry = NULL, *curr_node = NULL;
 
 	/* skip adding if cap_id already present in list */
@@ -243,11 +245,10 @@ static int msm_vidc_add_capid_to_list(struct msm_vidc_inst *inst,
 		}
 	}
 
-	entry = kzalloc(sizeof(*entry), GFP_ATOMIC);
-	if (!entry) {
-		i_vpr_e(inst, "%s: alloc failed\n", __func__);
-		return -ENOMEM;
-	}
+	rc = msm_vidc_vmem_alloc(sizeof(*entry), (void **)&entry, __func__);
+	if (rc)
+		return rc;
+
 	entry->cap_id = cap_id;
 	if (type & CHILD_LIST)
 		list_add_tail(&entry->list, &inst->children.list);
@@ -490,7 +491,7 @@ int msm_vidc_ctrl_deinit(struct msm_vidc_inst *inst)
 	i_vpr_h(inst, "%s(): num ctrls %d\n", __func__, inst->num_ctrls);
 	v4l2_ctrl_handler_free(&inst->ctrl_handler);
 	memset(&inst->ctrl_handler, 0, sizeof(struct v4l2_ctrl_handler));
-	kfree(inst->ctrls);
+	msm_vidc_vmem_free((void **)&inst->ctrls);
 	inst->ctrls = NULL;
 
 	return 0;
@@ -526,12 +527,10 @@ int msm_vidc_ctrl_init(struct msm_vidc_inst *inst)
 			__func__);
 		return -EINVAL;
 	}
-	inst->ctrls = kcalloc(num_ctrls,
-		sizeof(struct v4l2_ctrl *), GFP_KERNEL);
-	if (!inst->ctrls) {
-		i_vpr_e(inst, "%s: failed to allocate ctrl\n", __func__);
-		return -ENOMEM;
-	}
+	rc = msm_vidc_vmem_alloc(num_ctrls * sizeof(struct v4l2_ctrl *),
+			(void **)&inst->ctrls, __func__);
+	if (rc)
+		return rc;
 
 	rc = v4l2_ctrl_handler_init(&inst->ctrl_handler, num_ctrls);
 	if (rc) {
@@ -855,7 +854,7 @@ int msm_v4l2_op_s_ctrl(struct v4l2_ctrl *ctrl)
 		if (rc)
 			goto exit;
 		list_del(&curr_node->list);
-		kfree(curr_node);
+		msm_vidc_vmem_free((void **)&curr_node);
 	}
 
 	/* dynamic controls with request will be set along with qbuf */
@@ -868,14 +867,6 @@ int msm_v4l2_op_s_ctrl(struct v4l2_ctrl *ctrl)
 		i_vpr_e(inst, "%s: setting %s failed\n",
 			__func__, ctrl->name);
 		goto exit;
-	}
-
-	if (ctrl->id == V4L2_CID_MPEG_VIDC_LOWLATENCY_REQUEST) {
-		if (ctrl->val == V4L2_MPEG_MSM_VIDC_ENABLE) {
-			rc = msm_vidc_set_seq_change_at_sync_frame(inst);
-			if (rc)
-				return rc;
-		}
 	}
 
 exit:
@@ -2139,6 +2130,14 @@ int msm_vidc_adjust_bitrate_boost(void *instance, struct v4l2_ctrl *ctrl)
 		goto adjust;
 	}
 
+	/*
+	 * If the client sets bitrate_boost to 0,
+	 * this value will not be modified according to min_quality.
+	 */
+	if (adjusted_value == 0) {
+		goto adjust;
+	}
+
 	if (min_quality) {
 		adjusted_value = MAX_BITRATE_BOOST;
 		goto adjust;
@@ -2439,7 +2438,7 @@ int msm_vidc_adjust_v4l2_properties(struct msm_vidc_inst *inst)
 		if (rc)
 			goto exit;
 		list_del(&curr_node->list);
-		kfree(curr_node);
+		msm_vidc_vmem_free((void **)&curr_node);
 	}
 
 exit:
@@ -3575,7 +3574,7 @@ int msm_vidc_set_v4l2_properties(struct msm_vidc_inst *inst)
 			goto exit;
 
 		list_del(&curr_node->list);
-		kfree(curr_node);
+		msm_vidc_vmem_free((void **)&curr_node);
 	}
 
 exit:
@@ -3786,20 +3785,30 @@ int msm_vidc_set_pipe(void *instance,
 	return rc;
 }
 
-int msm_vidc_set_seq_change_at_sync_frame(void *instance)
+int msm_vidc_set_vui_timing_info(void *instance,
+	enum msm_vidc_inst_capability_type cap_id)
 {
 	int rc = 0;
-	u32 payload;
-	struct msm_vidc_inst* inst = (struct msm_vidc_inst*)instance;
+	struct msm_vidc_inst *inst = (struct msm_vidc_inst *)instance;
+	u32 hfi_value;
 
 	if (!inst || !inst->capabilities) {
 		d_vpr_e("%s: invalid params\n", __func__);
 		return -EINVAL;
 	}
 
-	payload = inst->capabilities->cap[LOWLATENCY_MODE].value;
-	rc = msm_vidc_packetize_control(inst, LOWLATENCY_MODE, HFI_PAYLOAD_U32,
-		&payload, sizeof(u32), __func__);
+	/*
+	 * hfi is HFI_PROP_DISABLE_VUI_TIMING_INFO and v4l2 cap is
+	 * V4L2_CID_MPEG_VIDC_VUI_TIMING_INFO and hence reverse
+	 * the hfi_value from cap_id value.
+	 */
+	if (inst->capabilities->cap[cap_id].value == V4L2_MPEG_MSM_VIDC_ENABLE)
+		hfi_value = 0;
+	else
+		hfi_value = 1;
+
+	rc = msm_vidc_packetize_control(inst, cap_id, HFI_PAYLOAD_U32,
+		&hfi_value, sizeof(u32), __func__);
 	if (rc)
 		return rc;
 

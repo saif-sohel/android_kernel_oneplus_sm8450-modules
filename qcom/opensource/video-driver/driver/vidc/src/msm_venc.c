@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2020-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <media/v4l2_vidc_extensions.h>
@@ -405,6 +406,11 @@ static int msm_venc_set_csc(struct msm_vidc_inst* inst,
 
 	msm_vidc_update_cap_value(inst, CSC,
 		msm_venc_csc_required(inst) ? 1 : 0, __func__);
+
+	if (!inst->capabilities->cap[CSC].hfi_id) {
+		i_vpr_h(inst, "%s: HFI_PROP_CSC is not supported\n", __func__);
+		return 0;
+	}
 
 	csc = inst->capabilities->cap[CSC].value;
 	i_vpr_h(inst, "%s: csc: %u\n", __func__, csc);
@@ -1024,6 +1030,10 @@ int msm_venc_streamon_output(struct msm_vidc_inst *inst)
 	if (rc)
 		goto error;
 
+	rc = msm_vidc_set_vui_timing_info(inst, VUI_TIMING_INFO);
+	if (rc)
+		goto error;
+
 	rc = msm_venc_property_subscription(inst, OUTPUT_PORT);
 	if (rc)
 		goto error;
@@ -1364,6 +1374,9 @@ int msm_venc_s_fmt(struct msm_vidc_inst *inst, struct v4l2_format *f)
 
 	if (f->type == INPUT_MPLANE) {
 		rc = msm_venc_s_fmt_input(inst, f);
+		if (rc)
+			goto exit;
+		rc = msm_vidc_check_session_supported(inst);
 		if (rc)
 			goto exit;
 	} else if (f->type == INPUT_META_PLANE) {
