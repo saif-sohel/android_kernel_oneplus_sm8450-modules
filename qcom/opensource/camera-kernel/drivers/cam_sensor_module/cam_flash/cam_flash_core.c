@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2017-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/module.h>
@@ -515,6 +516,20 @@ static int cam_flash_high(
 	return rc;
 }
 
+#ifdef OPLUS_FEATURE_CAMERA_COMMON
+int cam_flash_on(struct cam_flash_ctrl *flash_ctrl,
+	struct cam_flash_frame_setting *flash_data,
+	int mode) {
+	int rc = 0;
+	if (mode == 0) {
+		rc = cam_flash_low(flash_ctrl, flash_data);
+	} else if (mode == 1) {
+		rc = cam_flash_high(flash_ctrl, flash_data);
+	}
+	return rc;
+}
+#endif
+
 static int cam_flash_duration(struct cam_flash_ctrl *fctrl,
 	struct cam_flash_frame_setting *flash_data)
 {
@@ -989,6 +1004,12 @@ int cam_flash_i2c_pkt_parser(struct cam_flash_ctrl *fctrl, void *arg)
 		return -EINVAL;
 	}
 
+	if (!csl_packet->num_cmd_buf) {
+		CAM_ERR(CAM_FLASH, "Invalid num_cmd_buffer = %d",
+			csl_packet->num_cmd_buf);
+		return -EINVAL;
+	}
+
 	if ((csl_packet->header.op_code & 0xFFFFFF) !=
 		CAM_FLASH_PACKET_OPCODE_INIT &&
 		csl_packet->header.request_id <= fctrl->last_flush_req
@@ -1002,13 +1023,18 @@ int cam_flash_i2c_pkt_parser(struct cam_flash_ctrl *fctrl, void *arg)
 	if (csl_packet->header.request_id > fctrl->last_flush_req)
 		fctrl->last_flush_req = 0;
 
+	offset = (uint32_t *)((uint8_t *)&csl_packet->payload +
+		csl_packet->cmd_buf_offset);
+	cmd_desc = (struct cam_cmd_buf_desc *)(offset);
+	rc = cam_packet_util_validate_cmd_desc(cmd_desc);
+	if (rc) {
+		CAM_ERR(CAM_FLASH, "Invalid cmd desc ret: %d", rc);
+		return rc;
+	}
+
 	switch (csl_packet->header.op_code & 0xFFFFFF) {
 	case CAM_FLASH_PACKET_OPCODE_INIT: {
 		/* INIT packet*/
-		offset = (uint32_t *)((uint8_t *)&csl_packet->payload +
-			csl_packet->cmd_buf_offset);
-		cmd_desc = (struct cam_cmd_buf_desc *)(offset);
-
 		/* Loop through multiple command buffers */
 		for (i = 1; i < csl_packet->num_cmd_buf; i++) {
 			total_cmd_buf_in_bytes = cmd_desc[i].length;
@@ -1170,8 +1196,6 @@ int cam_flash_i2c_pkt_parser(struct cam_flash_ctrl *fctrl, void *arg)
 		break;
 	}
 	case CAM_FLASH_PACKET_OPCODE_SET_OPS: {
-		offset = (uint32_t *)((uint8_t *)&csl_packet->payload +
-			csl_packet->cmd_buf_offset);
 		frm_offset = csl_packet->header.request_id %
 			MAX_PER_FRAME_ARRAY;
 		/* add support for handling i2c_data*/
@@ -1185,7 +1209,6 @@ int cam_flash_i2c_pkt_parser(struct cam_flash_ctrl *fctrl, void *arg)
 		i2c_reg_settings->is_settings_valid = true;
 		i2c_reg_settings->request_id =
 			csl_packet->header.request_id;
-		cmd_desc = (struct cam_cmd_buf_desc *)(offset);
 		rc = cam_sensor_i2c_command_parser(
 			&fctrl->io_master_info,
 			i2c_reg_settings, cmd_desc, 1, NULL);
@@ -1197,8 +1220,6 @@ int cam_flash_i2c_pkt_parser(struct cam_flash_ctrl *fctrl, void *arg)
 		break;
 	}
 	case CAM_FLASH_PACKET_OPCODE_NON_REALTIME_SET_OPS: {
-		offset = (uint32_t *)((uint8_t *)&csl_packet->payload +
-			csl_packet->cmd_buf_offset);
 
 		/* add support for handling i2c_data*/
 		i2c_reg_settings = &fctrl->i2c_data.config_settings;
@@ -1216,7 +1237,6 @@ int cam_flash_i2c_pkt_parser(struct cam_flash_ctrl *fctrl, void *arg)
 		i2c_reg_settings->is_settings_valid = true;
 		i2c_reg_settings->request_id =
 			csl_packet->header.request_id;
-		cmd_desc = (struct cam_cmd_buf_desc *)(offset);
 		rc = cam_sensor_i2c_command_parser(
 			&fctrl->io_master_info,
 			i2c_reg_settings, cmd_desc, 1, NULL);
@@ -1369,12 +1389,18 @@ int cam_flash_pmic_pkt_parser(struct cam_flash_ctrl *fctrl, void *arg)
 	if (csl_packet->header.request_id > fctrl->last_flush_req)
 		fctrl->last_flush_req = 0;
 
+	offset = (uint32_t *)((uint8_t *)&csl_packet->payload +
+		csl_packet->cmd_buf_offset);
+	cmd_desc = (struct cam_cmd_buf_desc *)(offset);
+	rc = cam_packet_util_validate_cmd_desc(cmd_desc);
+	if (rc) {
+		CAM_ERR(CAM_FLASH, "Invalid cmd desc ret: %d", rc);
+		return rc;
+	}
+
 	switch (csl_packet->header.op_code & 0xFFFFFF) {
 	case CAM_FLASH_PACKET_OPCODE_INIT: {
 		/* INIT packet*/
-		offset = (uint32_t *)((uint8_t *)&csl_packet->payload +
-			csl_packet->cmd_buf_offset);
-		cmd_desc = (struct cam_cmd_buf_desc *)(offset);
 		rc = cam_mem_get_cpu_buf(cmd_desc->mem_handle,
 			&cmd_buf_ptr, &len_of_buffer);
 		if (rc) {
@@ -1460,8 +1486,6 @@ int cam_flash_pmic_pkt_parser(struct cam_flash_ctrl *fctrl, void *arg)
 		break;
 	}
 	case CAM_FLASH_PACKET_OPCODE_SET_OPS: {
-		offset = (uint32_t *)((uint8_t *)&csl_packet->payload +
-			csl_packet->cmd_buf_offset);
 		frm_offset = csl_packet->header.request_id %
 			MAX_PER_FRAME_ARRAY;
 		flash_data = &fctrl->per_frame[frm_offset];
@@ -1475,7 +1499,6 @@ int cam_flash_pmic_pkt_parser(struct cam_flash_ctrl *fctrl, void *arg)
 
 		flash_data->cmn_attr.request_id = csl_packet->header.request_id;
 		flash_data->cmn_attr.is_settings_valid = true;
-		cmd_desc = (struct cam_cmd_buf_desc *)(offset);
 		rc = cam_mem_get_cpu_buf(cmd_desc->mem_handle,
 			&cmd_buf_ptr, &len_of_buffer);
 		if (rc) {
@@ -1571,10 +1594,7 @@ int cam_flash_pmic_pkt_parser(struct cam_flash_ctrl *fctrl, void *arg)
 		break;
 	}
 	case CAM_FLASH_PACKET_OPCODE_NON_REALTIME_SET_OPS: {
-		offset = (uint32_t *)((uint8_t *)&csl_packet->payload +
-			csl_packet->cmd_buf_offset);
 		fctrl->nrt_info.cmn_attr.is_settings_valid = true;
-		cmd_desc = (struct cam_cmd_buf_desc *)(offset);
 		rc = cam_mem_get_cpu_buf(cmd_desc->mem_handle,
 			&cmd_buf_ptr, &len_of_buffer);
 		if (rc) {
@@ -1645,8 +1665,14 @@ int cam_flash_pmic_pkt_parser(struct cam_flash_ctrl *fctrl, void *arg)
 			}
 			flash_query_info =
 				(struct cam_flash_query_curr *)cmd_buf;
+
 #if __or(IS_REACHABLE(CONFIG_LEDS_QPNP_FLASH_V2), \
 			IS_REACHABLE(CONFIG_LEDS_QTI_FLASH))
+
+#ifdef OPLUS_FEATURE_CAMERA_COMMON
+			rc = set_flash_max_current_mA(fctrl->flash_max_current);
+			CAM_DBG(CAM_FLASH,"set_flash_max_current_mA");
+#endif
 			rc = cam_flash_led_prepare(fctrl->switch_trigger,
 				QUERY_MAX_AVAIL_CURRENT, &query_curr_ma,
 				soc_private->is_wled_flash);
