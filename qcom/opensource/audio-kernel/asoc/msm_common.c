@@ -75,8 +75,13 @@ struct chmap_pdata {
 static int qos_vote_status;
 static struct dev_pm_qos_request latency_pm_qos_req; /* pm_qos request */
 static unsigned int qos_client_active_cnt;
+#ifndef OPLUS_ARCH_EXTENDS
 /* set audio task affinity to core 1 & 2 */
 static const unsigned int audio_core_list[] = {1, 2};
+#else /* OPLUS_ARCH_EXTENDS */
+/* set audio task affinity to core 0 & 1 & 2 & 3 */
+static const unsigned int audio_core_list[] = {0, 1, 2, 3};
+#endif /* OPLUS_ARCH_EXTENDS */
 static cpumask_t audio_cpu_map = CPU_MASK_NONE;
 static struct dev_pm_qos_request *msm_audio_req = NULL;
 static bool kregister_pm_qos_latency_controls = false;
@@ -820,6 +825,10 @@ int msm_channel_map_get(struct snd_kcontrol *kcontrol,
 		} else {
 			chmap = tx_ch;
 			ch_cnt = tx_ch_cnt;
+		}
+		if (ch_cnt > 2) {
+			pr_err("%s: Incorrect channel count: %d\n", ch_cnt);
+			return -EINVAL;
 		}
 		len = sizeof(uint32_t) * (ch_cnt + 1);
 		chmap_data = kzalloc(len, GFP_KERNEL);

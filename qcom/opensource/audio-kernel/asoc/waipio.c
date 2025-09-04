@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2016-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
+#ifndef OPLUS_ARCH_EXTENDS
+#define OPLUS_ARCH_EXTENDS
+#endif /* OPLUS_ARCH_EXTENDS */
 
 #include <linux/clk.h>
 #include <linux/delay.h>
@@ -43,6 +47,14 @@
 #include "msm_common.h"
 #include "msm_dailink.h"
 
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_MM_FEEDBACK)
+#include "feedback/oplus_audio_kernel_fb.h"
+#ifdef dev_err
+#undef dev_err
+#define dev_err dev_err_fb_fatal_delay
+#endif
+#endif /* CONFIG_OPLUS_FEATURE_MM_FEEDBACK */
+
 #define DRV_NAME "waipio-asoc-snd"
 #define __CHIPSET__ "WAIPIO "
 #define MSM_DAILINK_NAME(name) (__CHIPSET__#name)
@@ -51,11 +63,15 @@
 #define WCD9XXX_MBHC_DEF_BUTTONS    8
 #define CODEC_EXT_CLK_RATE          9600000
 #define DEV_NAME_STR_LEN            32
+#ifndef OPLUS_ARCH_EXTENDS
 #define WCD_MBHC_HS_V_MAX           1600
+#else /* OPLUS_ARCH_EXTENDS */
+#define WCD_MBHC_HS_V_MAX           1700
+#endif /* OPLUS_ARCH_EXTENDS */
 
 #define WCN_CDC_SLIM_RX_CH_MAX 2
 #define WCN_CDC_SLIM_TX_CH_MAX 2
-#define WCN_CDC_SLIM_TX_CH_MAX_LITO 3
+#define WCN_CDC_SLIM_TX_CH_MAX_FM 3
 
 /* Number of WSAs */
 #define MONO_SPEAKER    1
@@ -69,6 +85,7 @@ struct msm_asoc_mach_data {
 	struct device_node *dmic01_gpio_p; /* used by pinctrl API */
 	struct device_node *dmic23_gpio_p; /* used by pinctrl API */
 	struct device_node *dmic45_gpio_p; /* used by pinctrl API */
+	struct device_node *dmic67_gpio_p; /* used by pinctrl API */
 	struct pinctrl *usbc_en2_gpio_p; /* used by pinctrl API */
 	bool is_afe_config_done;
 	struct device_node *fsa_handle;
@@ -87,6 +104,11 @@ static struct snd_soc_card snd_soc_card_waipio_msm;
 static int dmic_0_1_gpio_cnt;
 static int dmic_2_3_gpio_cnt;
 static int dmic_4_5_gpio_cnt;
+static int dmic_6_7_gpio_cnt;
+
+#if IS_ENABLED(CONFIG_AUDIO_EXTEND_DRV)
+extern void extend_codec_i2s_be_dailinks(struct device *dev, struct snd_soc_dai_link *dailink, size_t size);
+#endif /* CONFIG_AUDIO_EXTEND_DRV */
 
 static void *def_wcd_mbhc_cal(void);
 
@@ -129,7 +151,11 @@ static bool msm_usbc_swap_gnd_mic(struct snd_soc_component *component, bool acti
 	if (!pdata->fsa_handle)
 		return false;
 
+	#ifndef OPLUS_ARCH_EXTENDS
 	return fsa4480_switch_event(pdata->fsa_handle, FSA_MIC_GND_SWAP);
+	#else /* OPLUS_ARCH_EXTENDS */
+	return (0 == fsa4480_switch_event(pdata->fsa_handle, FSA_MIC_GND_SWAP));
+	#endif /* OPLUS_ARCH_EXTENDS */
 }
 
 static void msm_parse_upd_configuration(struct platform_device *pdev,
@@ -323,6 +349,11 @@ static int msm_dmic_event(struct snd_soc_dapm_widget *w,
 		dmic_gpio_cnt = &dmic_4_5_gpio_cnt;
 		dmic_gpio = pdata->dmic45_gpio_p;
 		break;
+	case 6:
+	case 7:
+		dmic_gpio_cnt = &dmic_6_7_gpio_cnt;
+		dmic_gpio = pdata->dmic67_gpio_p;
+		break;
 	default:
 		dev_err(component->dev, "%s: Invalid DMIC Selection\n",
 			__func__);
@@ -377,8 +408,8 @@ static const struct snd_soc_dapm_widget msm_int_dapm_widgets[] = {
 	SND_SOC_DAPM_MIC("Digital Mic3", msm_dmic_event),
 	SND_SOC_DAPM_MIC("Digital Mic4", msm_dmic_event),
 	SND_SOC_DAPM_MIC("Digital Mic5", msm_dmic_event),
-	SND_SOC_DAPM_MIC("Digital Mic6", NULL),
-	SND_SOC_DAPM_MIC("Digital Mic7", NULL),
+	SND_SOC_DAPM_MIC("Digital Mic6", msm_dmic_event),
+	SND_SOC_DAPM_MIC("Digital Mic7", msm_dmic_event),
 };
 
 static int msm_wcn_init(struct snd_soc_pcm_runtime *rtd)
@@ -386,7 +417,7 @@ static int msm_wcn_init(struct snd_soc_pcm_runtime *rtd)
 	unsigned int rx_ch[WCN_CDC_SLIM_RX_CH_MAX] = {157, 158};
 	unsigned int tx_ch[WCN_CDC_SLIM_TX_CH_MAX]  = {159, 160};
 	struct snd_soc_dai *codec_dai = asoc_rtd_to_codec(rtd, 0);
-    int ret = 0;
+	int ret = 0;
 
 	ret = snd_soc_dai_set_channel_map(codec_dai, ARRAY_SIZE(tx_ch),
 					   tx_ch, ARRAY_SIZE(rx_ch), rx_ch);
@@ -394,7 +425,23 @@ static int msm_wcn_init(struct snd_soc_pcm_runtime *rtd)
 		return ret;
 
 	msm_common_dai_link_init(rtd);
-    return ret;
+	return ret;
+}
+
+static int msm_wcn_init_btfm(struct snd_soc_pcm_runtime *rtd)
+{
+	unsigned int rx_ch[WCN_CDC_SLIM_RX_CH_MAX] = {157, 158};
+	unsigned int tx_ch[WCN_CDC_SLIM_TX_CH_MAX_FM]  = {159, 160, 161};
+	struct snd_soc_dai *codec_dai = asoc_rtd_to_codec(rtd, 0);
+	int ret = 0;
+
+	ret = snd_soc_dai_set_channel_map(codec_dai, ARRAY_SIZE(tx_ch),
+					   tx_ch, ARRAY_SIZE(rx_ch), rx_ch);
+	if (ret)
+		return ret;
+
+	msm_common_dai_link_init(rtd);
+	return ret;
 }
 
 static struct snd_info_entry *msm_snd_info_create_subdir(struct module *mod,
@@ -431,6 +478,7 @@ static void *def_wcd_mbhc_cal(void)
 	btn_high = ((void *)&btn_cfg->_v_btn_low) +
 		(sizeof(btn_cfg->_v_btn_low[0]) * btn_cfg->num_btn);
 
+	#ifndef OPLUS_ARCH_EXTENDS
 	btn_high[0] = 75;
 	btn_high[1] = 150;
 	btn_high[2] = 237;
@@ -439,6 +487,16 @@ static void *def_wcd_mbhc_cal(void)
 	btn_high[5] = 500;
 	btn_high[6] = 500;
 	btn_high[7] = 500;
+	#else /* OPLUS_ARCH_EXTENDS */
+	btn_high[0] = 130;		/* Hook ,0 ~ 160 Ohm*/
+	btn_high[1] = 131;
+	btn_high[2] = 253;		/* Volume + ,160 ~ 360 Ohm*/
+	btn_high[3] = 425;		/* Volume - ,360 ~ 680 Ohm*/
+	btn_high[4] = 426;
+	btn_high[5] = 426;
+	btn_high[6] = 426;
+	btn_high[7] = 426;
+	#endif /* OPLUS_ARCH_EXTENDS */
 
 	return wcd_mbhc_cal;
 }
@@ -514,6 +572,42 @@ static struct snd_soc_dai_link msm_wcn_be_dai_links[] = {
 		.ops = &msm_common_be_ops,
 		.ignore_suspend = 1,
 		SND_SOC_DAILINK_REG(slimbus_7_tx),
+	},
+};
+
+static struct snd_soc_dai_link msm_wcn_btfm_be_dai_links[] = {
+	{
+		.name = LPASS_BE_SLIMBUS_7_RX,
+		.stream_name = LPASS_BE_SLIMBUS_7_RX,
+		.playback_only = 1,
+		.trigger = {SND_SOC_DPCM_TRIGGER_POST,
+			SND_SOC_DPCM_TRIGGER_POST},
+		.init = &msm_wcn_init_btfm,
+		.ops = &msm_common_be_ops,
+		/* dai link has playback support */
+		.ignore_pmdown_time = 1,
+		.ignore_suspend = 1,
+		SND_SOC_DAILINK_REG(slimbus_7_rx),
+	},
+	{
+		.name = LPASS_BE_SLIMBUS_7_TX,
+		.stream_name = LPASS_BE_SLIMBUS_7_TX,
+		.capture_only = 1,
+		.trigger = {SND_SOC_DPCM_TRIGGER_POST,
+			SND_SOC_DPCM_TRIGGER_POST},
+		.ops = &msm_common_be_ops,
+		.ignore_suspend = 1,
+		SND_SOC_DAILINK_REG(slimbus_7_tx),
+	},
+	{
+		.name = LPASS_BE_SLIMBUS_8_TX,
+		.stream_name = LPASS_BE_SLIMBUS_8_TX,
+		.capture_only = 1,
+		.trigger = {SND_SOC_DPCM_TRIGGER_POST,
+			SND_SOC_DPCM_TRIGGER_POST},
+		.ops = &msm_common_be_ops,
+		.ignore_suspend = 1,
+		SND_SOC_DAILINK_REG(slimbus_8_tx),
 	},
 };
 
@@ -816,6 +910,7 @@ static struct snd_soc_dai_link msm_va_cdc_dma_be_dai_links[] = {
  * Senary	- lpi_i2s2
  * ------------------------------------
  */
+
 static struct snd_soc_dai_link msm_mi2s_dai_links[] = {
 	{
 		.name = LPASS_BE_PRI_MI2S_RX,
@@ -1083,6 +1178,7 @@ static struct snd_soc_dai_link msm_waipio_dai_links[
 			ARRAY_SIZE(ext_disp_be_dai_link) +
 			ARRAY_SIZE(msm_common_be_dai_links) +
 			ARRAY_SIZE(msm_wcn_be_dai_links) +
+			ARRAY_SIZE(msm_wcn_btfm_be_dai_links) +
 			ARRAY_SIZE(msm_mi2s_dai_links) +
 			ARRAY_SIZE(msm_tdm_dai_links)];
 
@@ -1351,6 +1447,12 @@ static struct snd_soc_card *populate_snd_card_dailinks(struct device *dev, int w
 		rc = of_property_read_u32(dev->of_node,
 				"qcom,mi2s-audio-intf", &val);
 		if (!rc && val) {
+
+#if IS_ENABLED(CONFIG_AUDIO_EXTEND_DRV)
+			extend_codec_i2s_be_dailinks(dev, msm_mi2s_dai_links, ARRAY_SIZE(msm_mi2s_dai_links));
+			pr_info("exchanged mi2s\n");
+#endif /* CONFIG_AUDIO_EXTEND_DRV */
+
 			memcpy(msm_waipio_dai_links + total_links,
 					msm_mi2s_dai_links,
 					sizeof(msm_mi2s_dai_links));
@@ -1385,6 +1487,16 @@ static struct snd_soc_card *populate_snd_card_dailinks(struct device *dev, int w
 			       msm_wcn_be_dai_links,
 			       sizeof(msm_wcn_be_dai_links));
 			total_links += ARRAY_SIZE(msm_wcn_be_dai_links);
+		}
+
+		rc = of_property_read_u32(dev->of_node, "qcom,wcn-btfm", &val);
+		if (!rc && val) {
+			dev_dbg(dev, "%s(): WCN BT FM support present\n",
+				__func__);
+			memcpy(msm_waipio_dai_links + total_links,
+			       msm_wcn_btfm_be_dai_links,
+			       sizeof(msm_wcn_btfm_be_dai_links));
+			total_links += ARRAY_SIZE(msm_wcn_btfm_be_dai_links);
 		}
 
 		dailink = msm_waipio_dai_links;
@@ -1489,6 +1601,77 @@ static int msm_int_wsa_init(struct snd_soc_pcm_runtime *rtd)
 	return 0;
 }
 
+#ifdef OPLUS_ARCH_EXTENDS
+static uint32_t oplus_sp_miid;
+static int oplus_sp_miid_info(struct snd_kcontrol *kcontrol,
+			struct snd_ctl_elem_info *uinfo)
+{
+	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
+	uinfo->count = 1;
+	uinfo->value.integer.min = 0;
+	uinfo->value.integer.max = 0xffffffff; /* 16 bit value */
+	return 0;
+}
+
+static int oplus_sp_miid_get(struct snd_kcontrol *kcontrol,
+		struct snd_ctl_elem_value *ucontrol)
+{
+	ucontrol->value.integer.value[0] = oplus_sp_miid;
+	return 0;
+}
+
+static int oplus_sp_miid_put(struct snd_kcontrol *kcontrol,
+				struct snd_ctl_elem_value *ucontrol)
+{
+	oplus_sp_miid = (uint32_t)ucontrol->value.integer.value[0];
+	return 1;
+}
+
+static uint32_t oplus_sp_pcm_id;
+static int oplus_sp_pcm_id_info(struct snd_kcontrol *kcontrol,
+			struct snd_ctl_elem_info *uinfo)
+{
+	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
+	uinfo->count = 1;
+	uinfo->value.integer.min = 0;
+	uinfo->value.integer.max = 0xffffffff; /* 16 bit value */
+	return 0;
+}
+
+static int oplus_sp_pcm_id_get(struct snd_kcontrol *kcontrol,
+		struct snd_ctl_elem_value *ucontrol)
+{
+	ucontrol->value.integer.value[0] = oplus_sp_pcm_id;
+	return 0;
+}
+
+static int oplus_sp_pcm_id_put(struct snd_kcontrol *kcontrol,
+				struct snd_ctl_elem_value *ucontrol)
+{
+	oplus_sp_pcm_id = (uint32_t)ucontrol->value.integer.value[0];
+	return 1;
+}
+
+static const struct snd_kcontrol_new oplus_sp_controls[] = {
+	//SP PCMID
+	{
+		.name = "SP PCMID",
+		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
+		.info = oplus_sp_pcm_id_info,
+		.get = oplus_sp_pcm_id_get,
+		.put = oplus_sp_pcm_id_put,
+	},
+	//SP MIID
+	{
+		.name = "SP MIID",
+		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
+		.info = oplus_sp_miid_info,
+		.get = oplus_sp_miid_get,
+		.put = oplus_sp_miid_put,
+	},
+};
+#endif /* OPLUS_ARCH_EXTENDS */
+
 static int msm_rx_tx_codec_init(struct snd_soc_pcm_runtime *rtd)
 {
 	int codec_variant = -1;
@@ -1566,6 +1749,10 @@ static int msm_rx_tx_codec_init(struct snd_soc_pcm_runtime *rtd)
 	snd_soc_dapm_ignore_suspend(dapm, "AMIC3");
 	snd_soc_dapm_ignore_suspend(dapm, "AMIC4");
 	snd_soc_dapm_sync(dapm);
+
+	#ifdef OPLUS_ARCH_EXTENDS
+	snd_soc_add_component_controls(component, oplus_sp_controls, ARRAY_SIZE(oplus_sp_controls));
+	#endif /* OPLUS_ARCH_EXTENDS */
 
 	pdata = snd_soc_card_get_drvdata(component->card);
 	if (!pdata->codec_root) {
@@ -1897,12 +2084,17 @@ static int msm_asoc_machine_probe(struct platform_device *pdev)
 	pdata->dmic45_gpio_p = of_parse_phandle(pdev->dev.of_node,
 					      "qcom,cdc-dmic45-gpios",
 					       0);
+	pdata->dmic67_gpio_p = of_parse_phandle(pdev->dev.of_node,
+					      "qcom,cdc-dmic67-gpios",
+					       0);
 	if (pdata->dmic01_gpio_p)
 		msm_cdc_pinctrl_set_wakeup_capable(pdata->dmic01_gpio_p, false);
 	if (pdata->dmic23_gpio_p)
 		msm_cdc_pinctrl_set_wakeup_capable(pdata->dmic23_gpio_p, false);
 	if (pdata->dmic45_gpio_p)
 		msm_cdc_pinctrl_set_wakeup_capable(pdata->dmic45_gpio_p, false);
+	if (pdata->dmic67_gpio_p)
+		msm_cdc_pinctrl_set_wakeup_capable(pdata->dmic67_gpio_p, false);
 
 	msm_common_snd_init(pdev, card);
 
@@ -1928,6 +2120,11 @@ static int msm_asoc_machine_probe(struct platform_device *pdev)
 	/* change card status to ONLINE */
 	dev_dbg(&pdev->dev, "%s: setting snd_card to ONLINE\n", __func__);
 	snd_card_set_card_status(SND_CARD_STATUS_ONLINE);
+
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_MM_FEEDBACK)
+	pr_info("%s: event_id=%u, version:%s\n", __func__, \
+			OPLUS_AUDIO_EVENTID_AUDIO_KERNEL_ERR, AUDIO_KERNEL_FB_VERSION);
+#endif /* CONFIG_OPLUS_FEATURE_MM_FEEDBACK */
 
 	return 0;
 err:
