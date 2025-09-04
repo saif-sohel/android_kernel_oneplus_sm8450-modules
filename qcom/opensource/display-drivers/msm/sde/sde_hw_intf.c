@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2021-2022 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2023 Qualcomm Innovation Center, Inc. All rights reserved.
  * Copyright (c) 2015-2021, The Linux Foundation. All rights reserved.
  */
 #include <linux/iopoll.h>
@@ -9,6 +9,9 @@
 #include "sde_hw_catalog.h"
 #include "sde_hw_intf.h"
 #include "sde_dbg.h"
+#if defined(CONFIG_PXLW_IRIS)
+#include "dsi_iris_api.h"
+#endif
 
 #define INTF_TIMING_ENGINE_EN           0x000
 #define INTF_CONFIG                     0x004
@@ -640,8 +643,7 @@ static int sde_hw_intf_setup_te_config(struct sde_hw_intf *intf,
 	 * less than 2^16 vsync clk cycles.
 	 */
 	spin_lock(&tearcheck_spinlock);
-	SDE_REG_WRITE(c, INTF_TEAR_SYNC_WRCOUNT,
-			(te->start_pos + te->sync_threshold_start + 1));
+
 	SDE_REG_WRITE(c, INTF_TEAR_SYNC_CONFIG_VSYNC, cfg);
 	wmb(); /* disable vsync counter before updating single buffer registers */
 	SDE_REG_WRITE(c, INTF_TEAR_SYNC_CONFIG_HEIGHT, te->sync_cfg_height);
@@ -654,6 +656,10 @@ static int sde_hw_intf_setup_te_config(struct sde_hw_intf *intf,
 			 te->sync_threshold_start));
 	cfg |= BIT(19); /* VSYNC_COUNTER_EN */
 	SDE_REG_WRITE(c, INTF_TEAR_SYNC_CONFIG_VSYNC, cfg);
+	wmb(); /* ensure vsync_counter_en is written */
+
+	SDE_REG_WRITE(c, INTF_TEAR_SYNC_WRCOUNT,
+			(te->start_pos + te->sync_threshold_start + 1));
 	spin_unlock(&tearcheck_spinlock);
 
 	return 0;
@@ -832,19 +838,6 @@ static void sde_hw_intf_override_tear_rd_ptr_val(struct sde_hw_intf *intf,
 	wmb();
 }
 
-static void sde_hw_intf_reset_tear_init_line_val(struct sde_hw_intf *intf,
-		u32 init_val)
-{
-	struct sde_hw_blk_reg_map *c;
-
-	if (!intf || !init_val)
-		return;
-
-	c = &intf->hw;
-
-	SDE_REG_WRITE(c, INTF_TEAR_SYNC_WRCOUNT, (init_val & 0xFFFF));
-}
-
 static void sde_hw_intf_vsync_sel(struct sde_hw_intf *intf,
 		u32 vsync_source)
 {
@@ -876,6 +869,12 @@ static void sde_hw_intf_enable_compressed_input(struct sde_hw_intf *intf,
 	c = &intf->hw;
 	intf_cfg2 = SDE_REG_READ(c, INTF_CONFIG2);
 
+#if defined(CONFIG_PXLW_IRIS)
+	if (iris_is_chip_supported()) {
+	/* fixed for dynamic switching from dsc panel timing into raw timing */
+		intf_cfg2 &= ~BIT(12);
+	}
+#endif
 	_check_and_set_comp_bit(intf, dsc_4hs_merge, compression_en,
 			&intf_cfg2);
 
@@ -945,7 +944,6 @@ static void _setup_intf_ops(struct sde_hw_intf_ops *ops,
 			sde_hw_intf_v1_check_and_reset_tearcheck;
 		ops->override_tear_rd_ptr_val =
 			sde_hw_intf_override_tear_rd_ptr_val;
-		ops->reset_tear_init_line_val = sde_hw_intf_reset_tear_init_line_val;
 	}
 
 	if (cap & BIT(SDE_INTF_RESET_COUNTER))
